@@ -12,9 +12,21 @@
  *                            NFSU2_BLEND_FIXTURE_MAX calls, default 4), the
  *                            format tests/vinylblend_unit.c reads
  * Both read the surface by locking it (0x5B96A0/0x5B96D0) once before and
- * once after the game's blend; only when they are set. */
+ * once after the game's blend; only when they are set.
+ *
+ * Test-only HD copy (runtime/hdskin.c; no setting yet):
+ *   NFSU2_HD_VINYLS=2|4      after the game's blend, a native copy of the
+ *                            surface 2 or 4 times larger is painted from the
+ *                            record (read before the game's in-place swaps)
+ *                            and the game's marker table; the game's memory
+ *                            is not written.  One log line per composite.
+ *   NFSU2_HD_VINYL_DIR=dir   remastered textures, <dir>/<TEXTURE NAME>.dds
+ *                            (see hdskin.h); without it every texture is the
+ *                            stock one scaled up nearest-neighbour */
 #include "cpu.h"
+#include "hdskin.h"
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -72,9 +84,97 @@ static uint32_t read_surface(CPU *c, uint32_t ti, uint32_t n, uint8_t *out){
 
 static void put32(FILE *f, uint32_t v){ fwrite(&v, 4, 1, f); }
 
+/* ---- the HD copy ------------------------------------------------------------- */
+static int hd_scale(void){
+    static int s = -1;
+    if (s >= 0) return s;
+    const char *e = getenv("NFSU2_HD_VINYLS");
+    s = 0;
+    if (e && *e){
+        if (!strcmp(e, "2") || !strcmp(e, "4")) s = atoi(e);
+        else fprintf(stderr, "[hd-vinyls] NFSU2_HD_VINYLS=%s ignored: 2 or 4\n", e);
+    }
+    if (s){
+        const char *d = getenv("NFSU2_HD_VINYL_DIR");
+        int n = hdskin_set_dir(d);
+        fprintf(stderr, "[hd-vinyls] on: scale %d, remaster directory %s (%d .dds files)\n", s, d && *d ? d : "none", n);
+    }
+    return s;
+}
+static int hd_keep(uint32_t ti, const char *name, void *ctx){
+    (void)ctx; char nm[32];
+    return ok(ti, 0x50u) && MR8(ti + 0x4au) == 0x20u && !strcmp(tname(ti, nm), name);
+}
+/* rec: the record as it was before the game's blend; called after it */
+static void hd_composite(const uint8_t *rec){
+    int s = hd_scale();
+    uint32_t ti; memcpy(&ti, rec, 4);
+    if (!s || !ok(ti, 0x50u) || MR8(ti + 0x4au) != 0x20u) return;
+    double t0; { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); t0 = (double)t.tv_sec * 1e3 + (double)t.tv_nsec * 1e-6; }
+    static VbParams P; static VbMarkers M;
+    static char nmbuf[VB_MAX_LAYERS][2][32];
+    HdTexName names[VB_MAX_LAYERS][2];
+    memset(&P, 0, sizeof P); memset(names, 0, sizeof names);
+    P.w = (int16_t)MR16(ti + 0x44u); P.h = (int16_t)MR16(ti + 0x46u);
+    if (P.w <= 0 || P.h <= 0) return;
+    uint32_t nb = (uint32_t)P.w * (uint32_t)P.h * 4u;
+#define R32(o_) ({ uint32_t v_; memcpy(&v_, rec + (o_), 4); v_; })
+    P.base = R32(4);
+    for (int k = 0; k < VB_NMARK; k++) P.marker[k] = R32(8 + 4 * k);
+    P.nlayers = (int)R32(0x1c4);
+    if (P.nlayers > VB_MAX_LAYERS) P.nlayers = VB_MAX_LAYERS;
+    int present = 0, hashbad = 0;
+    for (int l = 0; l < P.nlayers; l++){
+        uint32_t L = 0x24u + (uint32_t)l * LAYER_SIZE;
+        VbLayer *Y = &P.layer[l];
+        Y->key = R32(L); Y->ncolours = R32(L + 0x20u);
+        for (int k = 0; k < 4; k++) Y->colour[k] = R32(L + 0x24u + 4u * (uint32_t)k);
+        if (!Y->key) continue;
+        uint32_t v = R32(L + 0xcu), m = R32(L + 0x14u);
+        if (!ok(v, nb) || !ok(m, nb)){ Y->key = 0; continue; }     /* not readable: left out */
+        Y->w = P.w; Y->h = P.h;                                      /* the game reads w*h of each */
+        Y->vinyl = (const uint32_t *)(g_mem + v); Y->mask = (const uint32_t *)(g_mem + m);
+        for (int t = 0; t < 2; t++){
+            uint32_t tx = R32(L + 4u + 4u * (uint32_t)t);
+            names[l][t].name = tname(tx, nmbuf[l][t]);
+            names[l][t].hash = ok(tx, 0x28u) ? MR32(tx + 0x24u) : 0;
+            if (names[l][t].hash && strlen(nmbuf[l][t]) < 23 && hd_name_hash(nmbuf[l][t]) != names[l][t].hash) hashbad++;
+        }
+        present++;
+    }
+#undef R32
+    for (int k = 0; k < VB_NMARK; k++){
+        uint32_t n = MR32(G_MARK_CNT + 4u * (uint32_t)k);
+        M.count[k] = n > VB_GAME_SLOTS ? VB_GAME_SLOTS : (int)n;    /* the game's table holds 16 per colour */
+        for (int j = 0; j < M.count[k]; j++) M.pos[k][j] = MR32(G_MARK_POS + 4u * (uint32_t)(k * 16 + j));
+    }
+    char snm[32]; tname(ti, snm);
+    hdskin_prune(hd_keep, NULL);
+    HdStats st;
+    int r = hdskin_composite(ti, snm, &P, (const HdTexName (*)[2])names, &M, s, &st);
+    double t1; { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); t1 = (double)t.tv_sec * 1e3 + (double)t.tv_nsec * 1e-6; }
+    size_t ms, mc; hdskin_memory(&ms, &mc);
+    if (!r){ fprintf(stderr, "[hd-vinyls] composite surface=%s ti=%08x %dx%d x%d: FAILED (size or memory)\n", snm, ti, P.w, P.h, s); return; }
+    fprintf(stderr, "[hd-vinyls] composite surface=%s ti=%08x %dx%d -> %dx%d layers=%d remastered=%d stand-ins=%d cached=%d"
+            " marker_texels=%d gen=%u ms=%.2f (read %.2f, sources %.2f, blend %.2f) memory: surfaces %zu MB, sources %zu MB%s\n",
+            snm, ti, P.w, P.h, P.w * s, P.h * s, present, st.remastered, st.standin, st.cached, st.markers, st.generation,
+            t1 - t0, t1 - t0 - st.ms_sources - st.ms_blend, st.ms_sources, st.ms_blend, ms >> 20, mc >> 20,
+            hashbad ? " NAME-HASH MISMATCH" : "");
+}
+
 void sub_00611f10(CPU *restrict c){
     const char *tr = ENVC("NFSU2_BLEND_TRACE"), *fx = ENVC("NFSU2_BLEND_FIXTURE");
-    if (!tr && !fx){ sub_00611f10_orig(c); return; }
+    if (!tr && !fx){
+        if (!hd_scale()){ sub_00611f10_orig(c); return; }
+        uint32_t P = MR32(c->esp + 4u);
+        if (!ok(P, REC_SIZE)){ sub_00611f10_orig(c); return; }
+        uint8_t rec[REC_SIZE]; memcpy(rec, g_mem + P, REC_SIZE);
+        sub_00611f10_orig(c);
+        uint32_t r = c->eax;
+        if (r) hd_composite(rec);
+        c->eax = r;
+        return;
+    }
 
     static unsigned calls, dumps;
     unsigned id = calls++;
@@ -155,5 +255,6 @@ void sub_00611f10(CPU *restrict c){
     } else if (tr) fprintf(stderr, "[blend-trace] call=%u result=%u (not a 32-bit surface)\n", id, r);
     if (f) fclose(f);
     free(buf);
+    if (r && hd_scale()) hd_composite(rec);
     c->eax = r;
 }
