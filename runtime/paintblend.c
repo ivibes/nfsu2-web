@@ -22,15 +22,22 @@
  *                            is not written.  One log line per composite.
  *   NFSU2_HD_VINYL_DIR=dir   remastered textures, <dir>/<TEXTURE NAME>.dds
  *                            (see hdskin.h); without it every texture is the
- *                            stock one scaled up nearest-neighbour */
+ *                            stock one scaled up nearest-neighbour
+ *   NFSU2_HD_PROBE=1         per HD copy shown on the GPU, its hash and (Mac)
+ *                            the GPU texture read back (runtime/hdgpu.c)
+ * After each composite the copy is shown on the GPU in place of the
+ * surface's texture (runtime/hdgpu.h): its id is TextureInfo +0 -> +0x18 (the
+ * IDirect3DTexture9 that 0x5B96A0 locks) -> com.c's +28. */
 #include "cpu.h"
 #include "hdskin.h"
+#include "hdgpu.h"
 #include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
 void dispatch_indirect(CPU *c, uint32_t addr);
+void metal_tex_size(unsigned id, unsigned *w, unsigned *h);   /* metal.m / gpu_web.c */
 void sub_00611f10_orig(CPU *c);
 
 #define ENVC(nm_) ({ static const char *_ev_; static int _ei_; \
@@ -105,18 +112,42 @@ static int hd_keep(uint32_t ti, const char *name, void *ctx){
     (void)ctx; char nm[32];
     return ok(ti, 0x50u) && MR8(ti + 0x4au) == 0x20u && !strcmp(tname(ti, nm), name);
 }
+/* the GPU texture id of a paint surface (com.c's texture object: +4 w, +8 h,
+ * +20 D3DFORMAT, +24 levels, +28 Metal id); 0 if it is not the surface's size */
+typedef struct { unsigned mid, w, h, levels, fmt; } HdTex;
+static HdTex hd_tex(uint32_t ti){
+    HdTex t = {0, 0, 0, 0, 0};
+    if (!ok(ti, 0x50u)) return t;
+    uint32_t p = MR32(ti);
+    if (!ok(p, 0x1cu)) return t;
+    uint32_t d = MR32(p + 0x18u);
+    if (!ok(d, 32u)) return t;
+    t.w = MR32(d + 4u); t.h = MR32(d + 8u); t.fmt = MR32(d + 20u); t.levels = MR32(d + 24u);
+    if (t.w != MR16(ti + 0x44u) || t.h != MR16(ti + 0x46u) || t.fmt != 21u) return t;
+    t.mid = MR32(d + 28u);
+    return t;
+}
+static int hd_composite(const uint8_t *rec);
+/* after the game's blend (result r) of rec, the record as it was before it */
+static void hd_after(const uint8_t *rec, uint32_t r, HdTex tx){
+    uint32_t ti; memcpy(&ti, rec, 4);
+    int done = r && hd_composite(rec);
+    int w = 0, h = 0; uint32_t gen = 0;
+    const uint32_t *px = done ? hdskin_get(ti, &w, &h, &gen) : NULL;
+    hdgpu_blend_end(tx.mid, ti, px, w, h, gen, tx.w, tx.h, tx.levels, tx.fmt);
+}
 /* rec: the record as it was before the game's blend; called after it */
-static void hd_composite(const uint8_t *rec){
+static int hd_composite(const uint8_t *rec){
     int s = hd_scale();
     uint32_t ti; memcpy(&ti, rec, 4);
-    if (!s || !ok(ti, 0x50u) || MR8(ti + 0x4au) != 0x20u) return;
+    if (!s || !ok(ti, 0x50u) || MR8(ti + 0x4au) != 0x20u) return 0;
     double t0; { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); t0 = (double)t.tv_sec * 1e3 + (double)t.tv_nsec * 1e-6; }
     static VbParams P; static VbMarkers M;
     static char nmbuf[VB_MAX_LAYERS][2][32];
     HdTexName names[VB_MAX_LAYERS][2];
     memset(&P, 0, sizeof P); memset(names, 0, sizeof names);
     P.w = (int16_t)MR16(ti + 0x44u); P.h = (int16_t)MR16(ti + 0x46u);
-    if (P.w <= 0 || P.h <= 0) return;
+    if (P.w <= 0 || P.h <= 0) return 0;
     uint32_t nb = (uint32_t)P.w * (uint32_t)P.h * 4u;
 #define R32(o_) ({ uint32_t v_; memcpy(&v_, rec + (o_), 4); v_; })
     P.base = R32(4);
@@ -154,24 +185,37 @@ static void hd_composite(const uint8_t *rec){
     int r = hdskin_composite(ti, snm, &P, (const HdTexName (*)[2])names, &M, s, &st);
     double t1; { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); t1 = (double)t.tv_sec * 1e3 + (double)t.tv_nsec * 1e-6; }
     size_t ms, mc; hdskin_memory(&ms, &mc);
-    if (!r){ fprintf(stderr, "[hd-vinyls] composite surface=%s ti=%08x %dx%d x%d: FAILED (size or memory)\n", snm, ti, P.w, P.h, s); return; }
+    if (!r){ fprintf(stderr, "[hd-vinyls] composite surface=%s ti=%08x %dx%d x%d: FAILED (size or memory)\n", snm, ti, P.w, P.h, s); return 0; }
     fprintf(stderr, "[hd-vinyls] composite surface=%s ti=%08x %dx%d -> %dx%d layers=%d remastered=%d stand-ins=%d cached=%d"
             " marker_texels=%d gen=%u ms=%.2f (read %.2f, sources %.2f, blend %.2f) memory: surfaces %zu MB, sources %zu MB%s\n",
             snm, ti, P.w, P.h, P.w * s, P.h * s, present, st.remastered, st.standin, st.cached, st.markers, st.generation,
             t1 - t0, t1 - t0 - st.ms_sources - st.ms_blend, st.ms_sources, st.ms_blend, ms >> 20, mc >> 20,
             hashbad ? " NAME-HASH MISMATCH" : "");
+    return 1;
 }
 
 void sub_00611f10(CPU *restrict c){
     const char *tr = ENVC("NFSU2_BLEND_TRACE"), *fx = ENVC("NFSU2_BLEND_FIXTURE");
     if (!tr && !fx){
-        if (!hd_scale()){ sub_00611f10_orig(c); return; }
+        if (!hd_scale()){
+            uint32_t P0 = MR32(c->esp + 4u);
+            sub_00611f10_orig(c);
+            if (hdgpu_probe() && ok(P0, 4u)){            /* HD off: what the GPU has for the surface */
+                uint32_t ti = MR32(P0); HdTex tx = hd_tex(ti); unsigned gw = 0, gh = 0;
+                if (tx.mid) metal_tex_size(tx.mid, &gw, &gh);
+                fprintf(stderr, "[hd-vinyls] probe (HD off) t%u ti=%08x game %ux%u, GPU texture %ux%u, HD shown %d\n",
+                        tx.mid, ti, tx.w, tx.h, gw, gh, hdgpu_shown(tx.mid));
+            }
+            return;
+        }
         uint32_t P = MR32(c->esp + 4u);
         if (!ok(P, REC_SIZE)){ sub_00611f10_orig(c); return; }
         uint8_t rec[REC_SIZE]; memcpy(rec, g_mem + P, REC_SIZE);
+        HdTex tx = hd_tex(MR32(P));
+        hdgpu_blend_begin(tx.mid);
         sub_00611f10_orig(c);
         uint32_t r = c->eax;
-        if (r) hd_composite(rec);
+        hd_after(rec, r, tx);
         c->eax = r;
         return;
     }
@@ -235,6 +279,8 @@ void sub_00611f10(CPU *restrict c){
         }
     }
 
+    HdTex tx = hd_scale() ? hd_tex(ti) : (HdTex){0, 0, 0, 0, 0};
+    if (hd_scale()) hdgpu_blend_begin(tx.mid);
     sub_00611f10_orig(c);
     uint32_t r = c->eax;
 
@@ -255,6 +301,6 @@ void sub_00611f10(CPU *restrict c){
     } else if (tr) fprintf(stderr, "[blend-trace] call=%u result=%u (not a 32-bit surface)\n", id, r);
     if (f) fclose(f);
     free(buf);
-    if (r && hd_scale()) hd_composite(rec);
+    if (hd_scale()) hd_after(rec, r, tx);
     c->eax = r;
 }

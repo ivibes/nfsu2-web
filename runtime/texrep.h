@@ -36,24 +36,31 @@ int  texrep_shown(void);
 #import <Metal/Metal.h>
 #import <Cocoa/Cocoa.h>
 /* ---- main thread (metal.m draw encoder) --------------------------------- */
-extern int g_texrep_frame_on;                     /* bind replacements this frame */
+extern int g_texrep_frame_on;                     /* bind replacements this frame: 1 a pack's, 2 HD paint (hdgpu.h) */
 extern __strong id<MTLTexture> g_texrep_tex[TEXREP_MAXTEX];
 extern uint8_t g_texrep_k[TEXREP_MAXTEX];         /* log2(scale): pack levels above the original */
+extern __strong id<MTLTexture> g_texrep_hd[TEXREP_MAXTEX];   /* HD paint copies (runtime/hdgpu.c), over a pack's */
+extern uint8_t g_texrep_hdk[TEXREP_MAXTEX];       /* log2(scale) of the HD copy */
 /* start of every frame's encode: applies what the guest thread published
  * (and copies the game's own levels under the new ones, on q) */
 void texrep_main_frame(id<MTLCommandQueue> q);
 void texrep_add_menu(NSMenu *m);                  /* app menu: "Upscaled Textures" */
 unsigned texrep_skey_slow(unsigned sk, unsigned k);
+unsigned texrep_hd_skey(unsigned sk, unsigned k);
 /* texture bound for sampling at a stage: the replacement if there is one */
 static inline id<MTLTexture> texrep_pick(unsigned id_, id<MTLTexture> orig){
-    if (__builtin_expect(g_texrep_frame_on, 0) && id_ < TEXREP_MAXTEX && g_texrep_tex[id_])
-        return g_texrep_tex[id_];
+    if (__builtin_expect(g_texrep_frame_on, 0) && id_ < TEXREP_MAXTEX){
+        if ((g_texrep_frame_on & 2) && g_texrep_hd[id_]) return g_texrep_hd[id_];
+        if ((g_texrep_frame_on & 1) && g_texrep_tex[id_]) return g_texrep_tex[id_];
+    }
     return orig;
 }
 /* sampler key for a stage whose texture is id_ (see texrep_skey_slow) */
 static inline unsigned texrep_skey(unsigned id_, unsigned sk){
-    if (__builtin_expect(g_texrep_frame_on, 0) && id_ && id_ < TEXREP_MAXTEX && g_texrep_tex[id_])
-        return texrep_skey_slow(sk, g_texrep_k[id_]);
+    if (__builtin_expect(g_texrep_frame_on, 0) && id_ && id_ < TEXREP_MAXTEX){
+        if ((g_texrep_frame_on & 2) && g_texrep_hd[id_]) return texrep_hd_skey(sk, g_texrep_hdk[id_]);
+        if ((g_texrep_frame_on & 1) && g_texrep_tex[id_]) return texrep_skey_slow(sk, g_texrep_k[id_]);
+    }
     return sk;
 }
 #endif

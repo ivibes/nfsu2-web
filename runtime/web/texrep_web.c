@@ -36,6 +36,7 @@
  * but for the one texture built in (the pause menu's Photo Mode icon), whose
  * size and format they look for always. */
 #include "texrep.h"
+#include "hdgpu.h"
 #include "cpu.h"
 #include "inflate.h"
 #include <stdio.h>
@@ -404,9 +405,52 @@ static void cp_gone(unsigned mid){
     if (mid == g_cp.dst){ g_cp.dst = 0; g_cp.on = 0; }
 }
 
+/* ---- HD paint copies (hdgpu.h): the browser's part ---------------------------------------------
+ * As for a pack's texture: the GPU texture is made again at the HD size with its levels (the levels
+ * below level 0 2x2 box averages, made here), and gpu_web.c drops the game's own uploads to it from
+ * then on (hdgpu.c decides whether they keep the copy).  Hidden: the game's size again, with its level
+ * 0 as it uploaded it last. */
+static uint8_t *g_hdbuf; static size_t g_hdcap;
+void hdgpu_be_show(unsigned mid, const uint32_t *px, int w, int h, unsigned k, uint64_t hash,
+                   unsigned ow, unsigned oh, unsigned olevels, unsigned ofmt){
+    (void)k; (void)ow; (void)oh; (void)olevels; (void)ofmt;
+    if (w <= 0 || h <= 0 || w > 4096 || h > 4096) return;
+    unsigned lv = 1;
+    size_t n = 0;
+    for (unsigned lw = (unsigned)w, lh = (unsigned)h; ; lw = lw > 1 ? lw / 2 : 1, lh = lh > 1 ? lh / 2 : 1){
+        n += (size_t)lw * lh * 4u;
+        if (lw == 1 && lh == 1) break;
+        lv++;
+    }
+    if (!grow(&g_hdbuf, &g_hdcap, n)){ fprintf(stderr, "[hd-vinyls] gpu t%u: out of memory, the game's own stays\n", mid); return; }
+    memcpy(g_hdbuf, px, (size_t)w * h * 4u);
+    uint8_t *src = g_hdbuf;
+    for (unsigned lw = (unsigned)w, lh = (unsigned)h; lw > 1 || lh > 1; ){
+        unsigned nw = lw > 1 ? lw / 2 : 1, nh = lh > 1 ? lh / 2 : 1, dx = lw > 1 ? 4u : 0u, dy = lh > 1 ? lw * 4u : 0u;
+        uint8_t *dst = src + (size_t)lw * lh * 4u;
+        for (unsigned y = 0; y < nh; y++)
+            for (unsigned x = 0; x < nw; x++){
+                const uint8_t *p = src + ((size_t)(lh > 1 ? y * 2 : y) * lw + (lw > 1 ? x * 2 : x)) * 4u;
+                uint8_t *o = dst + ((size_t)y * nw + x) * 4u;
+                for (int c = 0; c < 4; c++) o[c] = (uint8_t)((p[c] + p[dx + c] + p[dy + c] + p[dy + dx + c] + 2) / 4);
+            }
+        src = dst; lw = nw; lh = nh;
+    }
+    metal_replace_texture(mid, (unsigned)w, (unsigned)h, lv, 21u, g_hdbuf);
+    if (hash) fprintf(stderr, "[hd-vinyls] gpu replaced t%u %dx%d levels=%u mip0=%016llx (as sent; the page is not read back)\n",
+                      mid, w, h, lv, (unsigned long long)hdgpu_hash(g_hdbuf, (size_t)w * h * 4u));
+}
+void hdgpu_be_hide(unsigned mid, const uint8_t *data, size_t n, unsigned ow, unsigned oh, unsigned olevels, unsigned ofmt){
+    if (!ow || !oh) return;                        /* the id holds a new texture already (hdgpu.c) */
+    metal_replace_texture(mid, ow, oh, olevels ? olevels : 1u, ofmt, NULL);
+    if (data && n >= (size_t)metal_level_pitch(ow, 0, ofmt) * metal_level_rows(oh, 0, ofmt))
+        metal_upload_texture(mid, 0, data, metal_level_pitch(ow, 0, ofmt), ow, oh, ofmt);
+}
+
 /* ---- the guest thread's hooks (com.c) ----------------------------------------------------------- */
 void texrep_created(unsigned mid, unsigned w, unsigned h, unsigned levels, unsigned d3dfmt, unsigned usage, unsigned pool){
     (void)usage; (void)pool;
+    hdgpu_created(mid);
     cp_gone(mid);
     if (mid && mid < TEXREP_MAXTEX){
         g_bi[mid] = w == PHOTO_ICON_KEY_W && h == PHOTO_ICON_KEY_H && d3dfmt == PHOTO_ICON_KEY_FMT;
@@ -419,6 +463,7 @@ void texrep_created(unsigned mid, unsigned w, unsigned h, unsigned levels, unsig
     g_t[mid].st = w <= 0xFFFF && h <= 0xFFFF && may_be(w, h, d3dfmt);
 }
 void texrep_uploaded(unsigned mid, unsigned level, const uint8_t *data, unsigned pitch, unsigned rows){
+    if (data && hdgpu_uploaded(mid, level, data, (size_t)pitch * rows)) return;    /* under an HD paint copy */
     if (mid && mid < TEXREP_MAXTEX && g_bi[mid] && copied_uploaded(mid, level, data, (size_t)pitch * rows)) return;
     if (mid && mid < TEXREP_MAXTEX && g_bi[mid] && !level && builtin_uploaded(mid, data, (size_t)pitch * rows)) return;
     if (!g_on || !mid || mid >= TEXREP_MAXTEX || !g_t[mid].st || level) return;
@@ -442,6 +487,7 @@ void texrep_uploaded(unsigned mid, unsigned level, const uint8_t *data, unsigned
     }
 }
 void texrep_surface_written(unsigned mid){
+    hdgpu_surface_written(mid);
     /* written through a surface (the car skin composite): dynamic, never the pack's */
     if (!g_on || !mid || mid >= TEXREP_MAXTEX || !g_t[mid].st) return;
     if (g_t[mid].st == 2){
@@ -451,7 +497,7 @@ void texrep_surface_written(unsigned mid){
     }
     g_t[mid].st = 0;
 }
-void texrep_released(unsigned mid){ cp_gone(mid); if (mid && mid < TEXREP_MAXTEX) g_t[mid].st = 0, g_bi[mid] = 0; }
+void texrep_released(unsigned mid){ hdgpu_released(mid); cp_gone(mid); if (mid && mid < TEXREP_MAXTEX) g_t[mid].st = 0, g_bi[mid] = 0; }
 /* the .tracks changes, into the Tracks table (TrackInfo[], 0x128 bytes each, +0x8A the int16 number) */
 #define G_TRACKS   0x00883da0u
 #define G_TRACKS_N 0x00883da4u
@@ -480,6 +526,7 @@ void texrep_frame(void){
         if (at[k] >= 0) MRF32(t + (uint32_t)at[k] * 0x128u + g_edits[k].off) = g_shown ? g_edits[k].v : was[k];
 }
 void texrep_report(void){
+    hdgpu_report();
     if (!g_on) return;
     unsigned used = 0;
     for (unsigned i = 0; i < g_n; i++) used += g_used[i];

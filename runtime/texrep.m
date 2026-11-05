@@ -67,6 +67,7 @@
 #import <Cocoa/Cocoa.h>
 #include "cpu.h"
 #include "texrep.h"
+#include "hdgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,7 +91,11 @@ const char *fileio_last_read(void);                /* fileio.c */
 int g_texrep_frame_on;
 __strong id<MTLTexture> g_texrep_tex[TEXREP_MAXTEX];
 uint8_t g_texrep_k[TEXREP_MAXTEX];
+__strong id<MTLTexture> g_texrep_hd[TEXREP_MAXTEX];
+uint8_t g_texrep_hdk[TEXREP_MAXTEX];
 static unsigned g_main_live;                       /* entries in g_texrep_tex */
+static unsigned g_main_hd;                         /* entries in g_texrep_hd */
+static unsigned long g_hdmip[4];                   /* main thread: HD paint binds by the game's mip filter */
 static _Atomic int g_shown = 1;                    /* menu item / autotest "texrep" */
 static _Atomic int g_pack_live;                    /* a pack is indexed (g_active), for the main thread */
 static NSMenuItem *g_menu_item;                    /* main thread: the hidden menu item, until g_pack_live */
@@ -285,10 +290,13 @@ typedef struct { int32_t ei; unsigned k, stacked, fail; void *tex; unsigned long
 static pthread_mutex_t g_rmx = PTHREAD_MUTEX_INITIALIZER;
 static Ready *g_ready; static unsigned g_ready_n, g_ready_cap;
 /* ---- guest -> main ---------------------------------------------------------- */
-enum { OP_SET, OP_CLEAR, OP_COPY };
+enum { OP_SET, OP_CLEAR, OP_COPY, OP_HDSET, OP_HDCLEAR };
 /* OP_SET: tex = a +1 reference for this id; stacked = copy this id's own
- * levels under the pack's (the first id shown of an Ent; the others share them) */
-typedef struct { int op; unsigned mid, k, level, stacked; void *tex; } Op;
+ * levels under the pack's (the first id shown of an Ent; the others share them).
+ * OP_HDSET: tex = a +1 reference to an HD paint copy (hdgpu.h) with its
+ * level 0 written, its lower levels made on the GPU here; hash = its level
+ * 0's hdgpu_hash for the read-back check (0: none) */
+typedef struct { int op; unsigned mid, k, level, stacked; void *tex; uint64_t hash; } Op;
 static pthread_mutex_t g_omx = PTHREAD_MUTEX_INITIALIZER;
 static Op *g_ops; static unsigned g_ops_n, g_ops_cap;
 static void op_post(Op o){
@@ -652,6 +660,7 @@ static void tr_drop(TR *t, unsigned mid){
 /* ---- guest hooks -------------------------------------------------------------- */
 void texrep_created(unsigned mid, unsigned w, unsigned h, unsigned levels,
                     unsigned d3dfmt, unsigned usage, unsigned pool){
+    hdgpu_created(mid);
     if (g_init == 2) return;
     tr_init(); if (g_init == 2 || !mid || mid >= TEXREP_MAXTEX) return;
     TR *t = &g_tr[mid];
@@ -678,18 +687,22 @@ static void tr_dynamic(TR *t, unsigned mid){
     if (t->state != S_NONE){ g_n_drop++; tr_drop(t, mid); }
 }
 void texrep_surface_written(unsigned mid){
+    hdgpu_surface_written(mid);
     if (g_init != 1 || !mid || mid >= TEXREP_MAXTEX) return;
     TR *t = &g_tr[mid];
     if (!t->ok || t->dyn) return;
     tr_dynamic(t, mid);
 }
 void texrep_released(unsigned mid){
+    hdgpu_released(mid);
     if (g_init != 1 || !mid || mid >= TEXREP_MAXTEX) return;
     TR *t = &g_tr[mid];
     tr_drop(t, mid);
     t->ok = 0;
 }
 void texrep_uploaded(unsigned mid, unsigned level, const uint8_t *data, unsigned pitch, unsigned rows){
+    /* under an HD paint copy: the game's texture got it, the encoder binds the copy */
+    if (data && hdgpu_uploaded(mid, level, data, (size_t)pitch * rows)) return;
     if (g_init != 1 || !mid || mid >= TEXREP_MAXTEX || !data) return;
     TR *t = &g_tr[mid];
     if (!t->ok || t->dyn) return;
@@ -841,6 +854,68 @@ void texrep_frame(void){
     if (ms > 1.0) g_frames_over1++;
 }
 
+/* ---- HD paint copies (hdgpu.h): the Mac's part --------------------------------------
+ * The game's own texture keeps every upload (GetLevelDesc, LockRect and the
+ * blend see 512); the draw encoder binds the HD copy in its place
+ * (texrep_pick), as for a pack's texture.  A new Metal texture per copy:
+ * level 0 written here on the guest thread, the levels below made with
+ * generateMipmapsForTexture on the main thread before the frame that first
+ * binds it. */
+void hdgpu_be_show(unsigned mid, const uint32_t *px, int w, int h, unsigned k, uint64_t hash,
+                   unsigned ow, unsigned oh, unsigned olevels, unsigned ofmt){
+    (void)ow; (void)oh; (void)olevels; (void)ofmt;
+    id<MTLDevice> dev = metal_device();
+    if (!dev || !mid || mid >= TEXREP_MAXTEX || w <= 0 || h <= 0) return;
+    unsigned lv = full_levels((unsigned)w, (unsigned)h);
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                   width:(NSUInteger)w height:(NSUInteger)h mipmapped:(lv > 1)];
+    td.mipmapLevelCount = lv;
+    td.usage = MTLTextureUsageShaderRead;
+    td.storageMode = MTLStorageModeShared;
+    id<MTLTexture> t = [dev newTextureWithDescriptor:td];
+    if (!t){ fprintf(stderr, "[hd-vinyls] gpu t%u: no Metal texture %dx%d, the game's own stays\n", mid, w, h); return; }
+    t.label = @"hd-paint";
+    [t replaceRegion:MTLRegionMake2D(0, 0, (NSUInteger)w, (NSUInteger)h) mipmapLevel:0 withBytes:px bytesPerRow:(NSUInteger)w * 4u];
+    op_post((Op){ OP_HDSET, mid, k, 0, 0, (__bridge_retained void *)t, hash });
+}
+void hdgpu_be_hide(unsigned mid, const uint8_t *data, size_t n,
+                   unsigned ow, unsigned oh, unsigned olevels, unsigned ofmt){
+    (void)data; (void)n; (void)ow; (void)oh; (void)olevels; (void)ofmt;   /* the game's texture has its uploads */
+    if (mid && mid < TEXREP_MAXTEX) op_post((Op){ OP_HDCLEAR, mid, 0, 0, 0, NULL, 0 });
+}
+/* NFSU2_HD_PROBE=1: once the GPU made the levels, the texture as bound, read
+ * back: its size, levels, level 0 against the copy, level k (the game's size) */
+static void hd_readback(id<MTLCommandBuffer> cb, id<MTLTexture> t, unsigned mid, unsigned k, uint64_t want){
+    [cb addCompletedHandler:^(id<MTLCommandBuffer> b){
+        (void)b;
+        NSUInteger w = t.width, h = t.height, lv = t.mipmapLevelCount;
+        uint8_t *buf = malloc(w * h * 4u);
+        if (!buf) return;
+        [t getBytes:buf bytesPerRow:w * 4u fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+        uint64_t h0 = hdgpu_hash(buf, w * h * 4u), hk = 0;
+        NSUInteger kw = 0, kh = 0;
+        if (k < lv){
+            kw = w >> k; kh = h >> k; if (!kw) kw = 1; if (!kh) kh = 1;
+            [t getBytes:buf bytesPerRow:kw * 4u fromRegion:MTLRegionMake2D(0, 0, kw, kh) mipmapLevel:k];
+            hk = hdgpu_hash(buf, kw * kh * 4u);
+        }
+        free(buf);
+        fprintf(stderr, "[hd-vinyls] gpu readback t%u %lux%lu levels=%lu mip0=%016llx %s, mip%u %lux%lu=%016llx\n",
+                mid, (unsigned long)w, (unsigned long)h, (unsigned long)lv, (unsigned long long)h0,
+                h0 == want ? "MATCH" : "MISMATCH", k, (unsigned long)kw, (unsigned long)kh, (unsigned long long)hk);
+    }];
+}
+/* sampler key for an HD paint copy: as for a pack's stacked texture
+ * (texrep_skey_slow), a stage the game samples without a mip filter gets
+ * linear mips with the LOD clamped at level k, the game's own size; with
+ * the game's mip filter the whole chain is read */
+unsigned texrep_hd_skey(unsigned sk, unsigned k){
+    unsigned mp = (sk >> 4) & 3u;
+    g_hdmip[mp]++;
+    if (mp == 0 && k) sk = (sk & ~0x30u) | 0x20u | ((k & 7u) << 15);
+    return sk;
+}
+
 /* ---- main thread ---------------------------------------------------------------- */
 void texrep_main_frame(id<MTLCommandQueue> q){
     Op *ops = NULL; unsigned n = 0;
@@ -868,6 +943,15 @@ void texrep_main_frame(id<MTLCommandQueue> q){
             g_texrep_tex[o.mid] = t; g_texrep_k[o.mid] = (uint8_t)o.k;
         } else if (o.op == OP_CLEAR){
             if (g_texrep_tex[o.mid]){ g_texrep_tex[o.mid] = nil; g_main_live--; }
+        } else if (o.op == OP_HDSET){
+            id<MTLTexture> t = (__bridge_transfer id<MTLTexture>)o.tex;
+            if (!cb){ cb = [q commandBuffer]; cb.label = @"texrep"; bl = [cb blitCommandEncoder]; }
+            if (t.mipmapLevelCount > 1) [bl generateMipmapsForTexture:t];
+            if (o.hash) hd_readback(cb, t, o.mid, o.k, o.hash);
+            if (!g_texrep_hd[o.mid]) g_main_hd++;
+            g_texrep_hd[o.mid] = t; g_texrep_hdk[o.mid] = (uint8_t)o.k;
+        } else if (o.op == OP_HDCLEAR){
+            if (g_texrep_hd[o.mid]){ g_texrep_hd[o.mid] = nil; g_main_hd--; }
         } else if (o.op == OP_COPY){
             id<MTLTexture> t = g_texrep_tex[o.mid], orig = metal_tex_object(o.mid);
             if (t && orig && orig.pixelFormat == t.pixelFormat && o.level < orig.mipmapLevelCount
@@ -880,7 +964,7 @@ void texrep_main_frame(id<MTLCommandQueue> q){
     }
     free(ops);
     if (cb){ [bl endEncoding]; [cb commit]; }       /* before this frame's command buffer */
-    g_texrep_frame_on = g_main_live && atomic_load(&g_shown);
+    g_texrep_frame_on = (g_main_live && atomic_load(&g_shown) ? 1 : 0) | (g_main_hd ? 2 : 0);
     if (g_menu_item && atomic_load(&g_pack_live)){
         [g_menu_item setHidden:NO]; g_menu_item = nil;
         fprintf(stderr, "[texrep] app menu: \"Upscaled Textures\" (Cmd-T) shown\n");
@@ -945,6 +1029,10 @@ int texrep_status(char *buf, size_t n){
 
 /* ---- report ------------------------------------------------------------------------ */
 void texrep_report(void){
+    hdgpu_report();
+    if (g_main_hd || g_hdmip[0] || g_hdmip[1] || g_hdmip[2] || g_hdmip[3])
+        fprintf(stderr, "[hd-vinyls] gpu: HD paint binds by the game's mip filter none/point/linear/other %lu/%lu/%lu/%lu\n",
+                g_hdmip[0], g_hdmip[1], g_hdmip[2], g_hdmip[3]);
     if (g_init != 1) return;
     if (g_active){
         fprintf(stderr, "[texrep] textures %lu created, %lu eligible, %lu hashed (%.1f MB, %.1f ms); "
