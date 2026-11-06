@@ -11,6 +11,10 @@ first, smaller fixes last. Left out: the server's insides, the forum
 bot, logs, tests, docs and cheat checks. A change that may or may not belong here is asked about before the release,
 not guessed.
 
+## 2026-11-06 (ad2ac34)
+
+- **Mods:** HD Vinyls: the cars' vinyls and doorlines painted at 1024 or 2048 from the server's remastered textures, in place of the game's 512. Off by default, in Mods.
+
 ## 2026-11-05 (1b97fcf)
 
 - **Vinyls:** Art Factory 28 to 34, Sha_Do's designs that only the Japanese release had, on every car after Art Factory 27 (ported to the PC by the underground2.net team).

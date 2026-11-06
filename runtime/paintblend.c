@@ -14,15 +14,24 @@
  * Both read the surface by locking it (0x5B96A0/0x5B96D0) once before and
  * once after the game's blend; only when they are set.
  *
- * Test-only HD copy (runtime/hdskin.c; no setting yet):
- *   NFSU2_HD_VINYLS=2|4      after the game's blend, a native copy of the
- *                            surface 2 or 4 times larger is painted from the
- *                            record (read before the game's in-place swaps)
- *                            and the game's marker table; the game's memory
- *                            is not written.  One log line per composite.
+ * The HD copy (runtime/hdskin.c), off by default:
+ *   NFSU2_HD_VINYLS = off | 1024 | 2048     settings.ini hd_vinyls (2 and 4,
+ *                            the scale, are taken too).  After the game's
+ *                            blend, a native copy of the surface 2 or 4
+ *                            times larger is painted from the record (read
+ *                            before the game's in-place swaps) and the game's
+ *                            marker table; the game's memory is not written.
+ *                            Only where a layer has a remaster: a paint of
+ *                            stand-ins alone would be the stock look scaled
+ *                            up, so the game's own texture stays.  One log
+ *                            line per composite.
+ *   TEXPACKS/hdvinyls.pak    in the game folder: the remasters
+ *                            (tools/hdvinyls.py), read when a composite needs
+ *                            them; none = every texture the stock one
  *   NFSU2_HD_VINYL_DIR=dir   remastered textures, <dir>/<TEXTURE NAME>.dds
- *                            (see hdskin.h); without it every texture is the
- *                            stock one scaled up nearest-neighbour
+ *                            (see hdskin.h), before the pack's (development)
+ *   NFSU2_HD_VINYLS_ALL=1    the copy for every paint, stand-ins alone too
+ *                            (tests: the stand-in copy and the GPU swap)
  *   NFSU2_HD_PROBE=1         per HD copy shown on the GPU, its hash and (Mac)
  *                            the GPU texture read back (runtime/hdgpu.c)
  * After each composite the copy is shown on the GPU in place of the
@@ -92,19 +101,27 @@ static uint32_t read_surface(CPU *c, uint32_t ti, uint32_t n, uint8_t *out){
 static void put32(FILE *f, uint32_t v){ fwrite(&v, 4, 1, f); }
 
 /* ---- the HD copy ------------------------------------------------------------- */
+int fileio_resolve_game(const char *win, char *out, size_t outsz);   /* fileio.c */
+static int hd_all(void){ const char *e = ENVC("NFSU2_HD_VINYLS_ALL"); return e && *e && strcmp(e, "0"); }
 static int hd_scale(void){
     static int s = -1;
     if (s >= 0) return s;
     const char *e = getenv("NFSU2_HD_VINYLS");
     s = 0;
     if (e && *e){
-        if (!strcmp(e, "2") || !strcmp(e, "4")) s = atoi(e);
-        else fprintf(stderr, "[hd-vinyls] NFSU2_HD_VINYLS=%s ignored: 2 or 4\n", e);
+        if (!strcmp(e, "2") || !strcmp(e, "1024")) s = 2;
+        else if (!strcmp(e, "4") || !strcmp(e, "2048")) s = 4;
+        else if (strcmp(e, "off") && strcmp(e, "0"))
+            fprintf(stderr, "[hd-vinyls] NFSU2_HD_VINYLS=%s ignored: off, 1024 or 2048\n", e);
     }
     if (s){
+        char path[1024];
+        int np = fileio_resolve_game("TEXPACKS\\hdvinyls.pak", path, sizeof path) ? hdskin_set_pack(path) : 0;
         const char *d = getenv("NFSU2_HD_VINYL_DIR");
         int n = hdskin_set_dir(d);
-        fprintf(stderr, "[hd-vinyls] on: scale %d, remaster directory %s (%d .dds files)\n", s, d && *d ? d : "none", n);
+        fprintf(stderr, "[hd-vinyls] on: %d (scale %d), pack %s (%d textures), remaster directory %s (%d .dds files)%s\n",
+                512 * s, s, np ? "TEXPACKS/hdvinyls.pak" : "none", np, d && *d ? d : "none", n,
+                hd_all() ? ", every paint" : "");
     }
     return s;
 }
@@ -181,6 +198,16 @@ static int hd_composite(const uint8_t *rec){
     }
     char snm[32]; tname(ti, snm);
     hdskin_prune(hd_keep, NULL);
+    int any = hd_all();
+    for (int l = 0; l < P.nlayers && !any; l++)
+        if (P.layer[l].key) for (int t = 0; t < 2; t++)
+            if (hdskin_has_remaster(names[l][t].hash ? names[l][t].hash : hd_name_hash(names[l][t].name))) any = 1;
+    if (!any){                                       /* the stock look: the game's own texture, no copy kept */
+        hdskin_forget(ti);
+        fprintf(stderr, "[hd-vinyls] composite surface=%s ti=%08x %dx%d layers=%d remastered=0: skipped, the game's own texture\n",
+                snm, ti, P.w, P.h, present);
+        return 0;
+    }
     HdStats st;
     int r = hdskin_composite(ti, snm, &P, (const HdTexName (*)[2])names, &M, s, &st);
     double t1; { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); t1 = (double)t.tv_sec * 1e3 + (double)t.tv_nsec * 1e-6; }

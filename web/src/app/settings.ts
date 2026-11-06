@@ -152,6 +152,9 @@ export const KEYS: readonly KeyDef[] = [
   { key: 'texture_parts', env: 'NFSU2_TEXPARTS', kind: 'parts', scope: 'mac' },
   { key: 'texture_dump', env: 'NFSU2_TEXDUMP', kind: 'dump', scope: 'mac' },
   { key: 'texture_budget', env: 'NFSU2_TEXBUDGET', kind: 'int', vals: '16..65536', scope: 'mac' },
+  // the cars' paint painted again at 1024 or 2048 from the remaster pack (runtime/paintblend.c, runtime/hdskin.c;
+  // TEXPACKS/hdvinyls.pak, tools/hdvinyls.py; the page fetches it ahead only when on: shell.ts texpack)
+  { key: 'hd_vinyls', env: 'NFSU2_HD_VINYLS', kind: 'enum', vals: 'off|1024|2048', scope: 'web' },
   // the browser's own, web-only (read by the page; also passed on, so the runtime could use it)
   { key: 'audio_latency', env: 'NFSU2_AUDIO_LATENCY', kind: 'enum', vals: 'interactive|balanced|playback|#', scope: 'web', device: true },
   // the game's Online mode against this server's own stand-in (web/server-rs/crates/online; read by runtime/winsock.c)
@@ -383,6 +386,12 @@ export const TEMPLATE = `# NFSU2 settings, read at every launch.
 # phones' GPUs decode the larger textures into four times the memory;
 # NFSU2_MAP_TEXTURES = original keeps the game's maps).  [NFSU2_UI_TEXTURES]
 #ui_textures = original
+# The cars' paint (vinyls and doorlines) painted again at 1024x1024 or
+# 2048x2048 from remastered textures, in place of the game's 512x512, where
+# this server has them (TEXPACKS/hdvinyls.pak, tools/hdvinyls.py).  A car
+# with no remastered texture keeps the game's own paint.  2048 takes 16 MB
+# per painted car.  [NFSU2_HD_VINYLS]
+#hd_vinyls = off
 # Textures without smoothing (point sampling), blocky like early PC games;
 # on overrides the game's Texture Filtering.  [NFSU2_PIXELATED_TEXTURES]
 #pixelated_textures = off
@@ -940,6 +949,12 @@ export interface Resolved {
 export function uiPack(v: string | undefined): string {
   const x = (v ?? '').trim().toLowerCase();
   return x === 'original' || x === 'map' ? '' : x;
+}
+/** the remaster pack an hd_vinyls value (NFSU2_HD_VINYLS) needs, as runtime/paintblend.c reads TEXPACKS/hdvinyls.pak:
+ *  hdvinyls for 1024 and 2048 (and the runtime's 2 and 4), '' for off */
+export function hdPack(v: string | undefined): string {
+  const x = (v ?? '').trim().toLowerCase();
+  return ['1024', '2048', '2', '4'].includes(x) ? 'hdvinyls' : '';
 }
 
 /**

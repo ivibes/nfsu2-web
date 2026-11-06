@@ -3,8 +3,9 @@
 // still names), tests/watchdog_unit.c (runtime/watchdog.c: no false stall from a stamp a little ahead of its
 // clock), tests/racenet_unit.c (runtime/racenet.c: the creator's list only from the creator, with the slot each
 // joiner's game drives, each joiner's car states for that slot only) and tests/racecars_unit.c (runtime/racecars.c:
-// each racer's own car states, who may speak for which car, the cars drawn and driven).  Every case of theirs
-// passes, and each one ran.
+// each racer's own car states, who may speak for which car, the cars drawn and driven) and tests/hdskin_unit.c
+// without its fixtures (runtime/hdskin.c: the HD vinyls' remaster pack that tools/hdvinyls.py packs, read back pixel for
+// pixel; it needs python3).  Every case of theirs passes, and each one ran.
 //   node --test web/test/runtime-unit.test.mjs        (macOS with clang: Xcode's command line tools; about 10 s)
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -58,4 +59,10 @@ test('racecars_unit: each racer\'s own car states, only for its own car, drawn a
   for (const c of ['wire', 'stranger', 'own-slot', 'bound', 'rtt', 'drawn', 'ghost', 'hit', 'hit-back', 'driven', 'reset', 'claimed', 'honest',
     'old-creator']) assert.ok(pass.includes(c), `case ${c} passed`);
   assert.match(out, /racecars unit tests: all passed/);
+});
+
+test('hdskin_unit: the remaster pack that tools/hdvinyls.py writes, read back pixel for pixel', { skip }, () => {
+  const { out, pass } = run('hdskin_unit', ['-O2', '-Wall', '-ffp-contract=off', 'runtime/hdskin.c', 'runtime/vinylblend.c']);
+  assert.ok(pass.includes('pack'), 'case pack passed');
+  assert.match(out, /hdskin_unit: all passed/);
 });

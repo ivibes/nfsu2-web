@@ -245,6 +245,8 @@ static const struct { const char *key, *env; int kind; const char *vals; } g_key
     { "texture_parts",            "NFSU2_TEXPARTS",             K_PARTS    },
     { "texture_dump",             "NFSU2_TEXDUMP",              K_DUMP     },
     { "texture_budget",           "NFSU2_TEXBUDGET",            K_INT, "16..65536" },
+    /* the cars' paint at 1024 or 2048 (runtime/paintblend.c, runtime/hdskin.c) */
+    { "hd_vinyls",                "NFSU2_HD_VINYLS",            K_ENUM, "off|1024|2048" },
 };
 #define NKEYS (int)(sizeof g_keys / sizeof g_keys[0])
 
@@ -518,7 +520,14 @@ static const char *const k_template =
 "# on = save every texture the game loads into Textures/dump (or a folder\n"
 "# given here), for tools/texpack: menus and cars come from there.\n"
 "# [NFSU2_TEXDUMP]\n"
-"#texture_dump = off\n";
+"#texture_dump = off\n"
+"\n"
+"# The cars' paint (vinyls and doorlines) painted again at 1024x1024 or\n"
+"# 2048x2048 from remastered textures, in place of the game's 512x512: the\n"
+"# game folder's TEXPACKS/hdvinyls.pak, made with tools/hdvinyls.py.  A car\n"
+"# with no remastered texture keeps the game's own paint.  2048 takes 16 MB\n"
+"# per painted car.  [NFSU2_HD_VINYLS]\n"
+"#hd_vinyls = off\n";
 
 static int truthy(const char *v){
     return !strcasecmp(v, "1") || !strcasecmp(v, "on") || !strcasecmp(v, "yes") ||

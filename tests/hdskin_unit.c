@@ -3,6 +3,9 @@
  *
  *   clang -O2 -Wall -ffp-contract=off -Iruntime -o out/hdskin_unit tests/hdskin_unit.c runtime/hdskin.c runtime/vinylblend.c
  *   out/hdskin_unit <scratch dir> fixture.bin [...]
+ *   out/hdskin_unit                (the pack's round trip alone, in out/hdskin_unit.tmp)
+ * from the repo's root (the pack cases run python3 tools/hdvinyls.py;
+ * HDSKIN_TOOL names another).
  *
  * Fixtures as for tests/vinylblend_unit.c (runtime/paintblend.c,
  * NFSU2_BLEND_FIXTURE=dir).  The scratch dir gets the fake remasters.  Cases:
@@ -16,6 +19,14 @@
  *              sources, differs from the stand-in copy somewhere, and only
  *              where layer 0's stock mask covers; a .dds of another name and
  *              a remaster of a size that does not fit change nothing
+ *   pack       the remaster pack (tools/hdvinyls.py): DDS files of each
+ *              format the runtime reads (A8R8G8B8, A8B8G8R8, X8R8G8B8, two
+ *              with the same pixels) and one it does not, packed by the tool
+ *              and read back through the pack, pixel for pixel the DDS file
+ *              as hd_load_dds reads it; the fake remaster of the remaster
+ *              case from a pack paints the same copy as from the directory,
+ *              the directory's file comes before the pack's, and a pack whose
+ *              pixels were damaged is refused (CRC-32) for the stand-in
  *   api        hdskin_get, hdskin_forget, generations
  * Every case prints "PASS <case> ..." or "FAIL <case> ..."; exit 1 on a FAIL. */
 #include "hdskin.h"
@@ -126,19 +137,43 @@ static void test_nearest(const char *path, const Fx *x, uint32_t key){
         }
 }
 
-static int write_dds(const char *path, const uint32_t *px, int w, int h){
+/* kind 0: A8R8G8B8, 1: A8B8G8R8 (px written with red and blue swapped), 2: X8R8G8B8, 3: DXT1 (refused) */
+static int write_dds_as(const char *path, const uint32_t *px, int w, int h, int kind){
     uint8_t hd[128]; memset(hd, 0, sizeof hd);
     uint32_t v[32]; memset(v, 0, sizeof v);
     memcpy(hd, "DDS ", 4);
     v[1] = 124; v[2] = 0x1 | 0x2 | 0x4 | 0x1000 | 0x8; v[3] = (uint32_t)h; v[4] = (uint32_t)w; v[5] = (uint32_t)w * 4u;
     v[19] = 32; v[20] = 0x40 | 0x1; v[22] = 32; v[23] = 0x00ff0000u; v[24] = 0x0000ff00u; v[25] = 0x000000ffu; v[26] = 0xff000000u;
+    if (kind == 1){ v[23] = 0x000000ffu; v[25] = 0x00ff0000u; }
+    if (kind == 2){ v[20] = 0x40; v[26] = 0; }
+    if (kind == 3){ v[20] = 0x4; memcpy(&v[21], "DXT1", 4); }
     v[27] = 0x1000;
     memcpy(hd + 4, v + 1, 124);
     FILE *f = fopen(path, "wb");
     if (!f) return 0;
-    int ok = fwrite(hd, 1, 128, f) == 128 && fwrite(px, 4, (size_t)w * h, f) == (size_t)w * h;
+    int ok = fwrite(hd, 1, 128, f) == 128;
+    for (size_t i = 0; ok && i < (size_t)w * h; i++){
+        uint32_t q = kind == 1 ? vb_swap_rb(px[i]) : px[i];
+        ok = fwrite(&q, 4, 1, f) == 1;
+    }
     return fclose(f) == 0 && ok;
 }
+static int write_dds(const char *path, const uint32_t *px, int w, int h){ return write_dds_as(path, px, w, h, 0); }
+
+/* the pack tool on a folder; 1 if it wrote the pack */
+static int run_tool(const char *src, const char *pak){
+    const char *tool = getenv("HDSKIN_TOOL");
+    char cmd[3200];
+    snprintf(cmd, sizeof cmd, "python3 '%s' --out '%s' '%s' > '%s.log' 2>&1", tool && *tool ? tool : "tools/hdvinyls.py", pak, src, pak);
+    remove(pak);
+    int r = system(cmd);
+    FILE *f = fopen(pak, "rb");
+    if (f) fclose(f);
+    if (r || !f) printf("     %s: exit %d, see %s.log\n", cmd, r, pak);
+    return !r && f;
+}
+static uint32_t g_seed = 12345u;
+static uint32_t rnd(void){ g_seed = g_seed * 1103515245u + 12345u; return g_seed ^ (g_seed >> 15); }
 
 static void test_remaster(const char *dir, const char *path, const Fx *x){
     const int s = 2, w = x->P.w, h = x->P.h, W = w * s, H = h * s;
@@ -205,6 +240,127 @@ static void test_remaster(const char *dir, const char *path, const Fx *x){
     free(ref); free(fake);
 }
 
+/* the remaster pack: the tool's pack, read back, equals the DDS files */
+static void test_pack_roundtrip(const char *dir){
+    char src[1024], pak[1100], p[1200];
+    snprintf(src, sizeof src, "%s/pack-src", dir);
+    snprintf(p, sizeof p, "mkdir -p '%s' && rm -f '%s'/*.dds", src, src);
+    if (system(p)){ printf("FAIL pack: cannot make %s\n", src); g_fail = 1; return; }
+    /* 1. round trip: one file of each format, two with the same pixels, one refused */
+    static const char *const nm[5] = { "PACK_ARGB", "pack_abgr", "PACK_XRGB", "PACK_SAME", "PACK_DXT1" };
+    static const int kind[5] = { 0, 1, 2, 0, 3 }, side[5] = { 1024, 256, 2048, 1024, 64 };
+    uint32_t *px[5] = { 0 };
+    int wrote = 1;
+    for (int i = 0; i < 5; i++){
+        size_t n = (size_t)side[i] * side[i];
+        px[i] = malloc(n * 4u);
+        for (size_t j = 0; j < n; j++) px[i][j] = i == 3 ? px[0][j] : (j % 7 == 0 ? 0 : rnd());   /* zeros, as a vinyl's clear */
+        snprintf(p, sizeof p, "%s/%s.dds", src, nm[i]);
+        wrote = wrote && write_dds_as(p, px[i], side[i], side[i], kind[i]);
+    }
+    snprintf(pak, sizeof pak, "%s/test.pak", dir);
+    int built = wrote && run_tool(src, pak);
+    int n = built ? hdskin_set_pack(pak) : 0;
+    size_t differ = 0; int read = 0, refused = 0;
+    for (int i = 0; i < 5; i++){
+        char upper[32]; size_t k = 0;
+        for (; nm[i][k]; k++) upper[k] = (char)(nm[i][k] >= 'a' && nm[i][k] <= 'z' ? nm[i][k] - 32 : nm[i][k]);
+        upper[k] = 0;
+        int pw = 0, ph = 0, dw = 0, dh = 0; char why[160] = "";
+        uint32_t *a = hdskin_pack_pixels(hd_name_hash(upper), &pw, &ph, why, sizeof why);
+        snprintf(p, sizeof p, "%s/%s.dds", src, nm[i]);
+        uint32_t *b = hd_load_dds(p, &dw, &dh, NULL, 0);
+        if (kind[i] == 3){ refused += !a && !b && !hdskin_has_remaster(hd_name_hash(upper)); free(a); free(b); continue; }
+        if (a && b && pw == dw && ph == dh && pw == side[i]){
+            read++;
+            for (size_t j = 0; j < (size_t)pw * ph; j++) differ += a[j] != b[j];
+        } else differ++;
+        free(a); free(b);
+    }
+    long psize = 0; { FILE *f = fopen(pak, "rb"); if (f){ fseek(f, 0, SEEK_END); psize = ftell(f); fclose(f); } }
+    CHECK(built && n == 4 && read == 4 && differ == 0 && refused == 1 && psize > 0 && psize < (long)(2048 * 2048 * 4 + 1024 * 1024 * 4 + 256 * 256 * 4 + (1 << 20)),   /* PACK_SAME shares */
+          "pack: round trip: tool %s, %d textures in the pack (%ld bytes), %d read back, %zu pixels differ from the DDS files,"
+          " %d refused by the tool\n", built ? "ran" : "FAILED", n, psize, read, differ, refused);
+    for (int i = 0; i < 5; i++) free(px[i]);
+    hdskin_set_pack(NULL);
+}
+
+/* the remaster case's copy from a pack (the files test_remaster wrote): as from the directory */
+static void test_pack(const char *dir, const char *path, const Fx *x){
+    char src[1024], pak[1100], p[1200];
+    snprintf(src, sizeof src, "%s/pack-src", dir);
+    snprintf(pak, sizeof pak, "%s/test.pak", dir);
+    snprintf(p, sizeof p, "mkdir -p '%s'", src);
+    if (system(p)){ printf("FAIL pack: cannot make %s\n", src); g_fail = 1; return; }
+    /* 2. the remaster case from the pack: the same copy as from the directory */
+    const int s = 2;
+    static const char *const given[4] = { "SKYLINE_TEAR_012", "SKYLINE_TEAR_012_MASK", "SKYLINE_DOORLINE", "SKYLINE_DOORLINE_MASK" };
+    HdTexName names[VB_MAX_LAYERS][2]; names_for(x, names, given);
+    hdskin_set_pack(NULL);
+    hdskin_set_dir(dir);
+    HdStats st;
+    int r1 = hdskin_composite(0xdd0u, "TEST", &x->P, (const HdTexName (*)[2])names, &x->M, s, &st);
+    const uint32_t *hd = hdskin_get(0xdd0u, NULL, NULL, NULL);
+    const size_t N = (size_t)x->P.w * s * x->P.h * s;
+    uint32_t *fromdir = malloc(N * 4u);
+    if (r1 && hd) memcpy(fromdir, hd, N * 4u);
+    int rem_dir = st.remastered;
+    snprintf(p, sizeof p, "rm -f '%s'/*.dds && cp '%s/skyline_tear_012.dds' '%s/'", src, dir, src);
+    int cp = !system(p) && run_tool(src, pak);
+    hdskin_set_dir(NULL);
+    int n2 = cp ? hdskin_set_pack(pak) : 0;
+    int has = hdskin_has_remaster(hd_name_hash("SKYLINE_TEAR_012")), hasnot = hdskin_has_remaster(hd_name_hash("SKYLINE_DOORLINE"));
+    int r2 = hdskin_composite(0xdd1u, "TEST", &x->P, (const HdTexName (*)[2])names, &x->M, s, &st);
+    hd = hdskin_get(0xdd1u, NULL, NULL, NULL);
+    size_t vsdir = r1 && r2 && hd ? 0 : (size_t)-1;
+    if (vsdir == 0) for (size_t i = 0; i < N; i++) vsdir += hd[i] != fromdir[i];
+    CHECK(rem_dir == 1 && n2 == 1 && has && !hasnot && st.remastered == 1 && st.standin == 3 && vsdir == 0,
+          "pack: remaster %s s=%d: %d remastered from the directory, %d from the pack (%d stand-ins); %zu pixels differ\n",
+          path, s, rem_dir, st.remastered, st.standin, vsdir);
+
+    /* 3. the directory before the pack: a directory whose file differs paints its own */
+    char d2[1100]; snprintf(d2, sizeof d2, "%s/override", dir);
+    uint32_t *flat = malloc(N * 4u);
+    for (size_t i = 0; i < N; i++) flat[i] = 0xff102030u;
+    snprintf(p, sizeof p, "mkdir -p '%s'", d2);
+    snprintf(src, sizeof src, "%s/SKYLINE_TEAR_012.dds", d2);
+    int ov = !system(p) && write_dds(src, flat, x->P.w * s, x->P.h * s);
+    hdskin_set_dir(d2);
+    int r3 = hdskin_composite(0xdd2u, "TEST", &x->P, (const HdTexName (*)[2])names, &x->M, s, &st);
+    hd = hdskin_get(0xdd2u, NULL, NULL, NULL);
+    size_t vs = 0;
+    if (r3 && hd) for (size_t i = 0; i < N; i++) vs += hd[i] != fromdir[i];
+    CHECK(ov && r3 && hd && st.remastered == 1 && vs > 0, "pack: and directory: the directory's file painted (%zu pixels differ from the pack's)\n", vs);
+    hdskin_set_dir(NULL);
+    free(flat);
+
+    /* 4. a damaged pack: its CRC-32, then a byte of its pixels changed: refused, the stand-in (the stock look) */
+    for (int dmg = 0; dmg < 2; dmg++){
+        FILE *f = fopen(pak, "r+b");
+        long at = 16 + 20;                                         /* entry 0's crc */
+        if (f){
+            if (dmg){ fseek(f, 0, SEEK_END); at = ftell(f) - 64; }
+            fseek(f, at, SEEK_SET); int c = fgetc(f); fseek(f, at, SEEK_SET); fputc(c ^ 0x5a, f); fclose(f);
+        }
+        int n4 = hdskin_set_pack(pak);
+        int pw = 0, ph = 0; char why[160] = "";
+        uint32_t *bad = hdskin_pack_pixels(hd_name_hash("SKYLINE_TEAR_012"), &pw, &ph, why, sizeof why);
+        int r4 = hdskin_composite(0xdd3u, "TEST", &x->P, (const HdTexName (*)[2])names, &x->M, s, &st);
+        hd = hdskin_get(0xdd3u, NULL, NULL, NULL);
+        size_t back = r4 && hd ? blocks_vs(hd, x->out, x->P.w, x->P.h, s, 3) : (size_t)-1;
+        /* a changed pixel byte may still unpack: then its CRC-32 refuses it */
+        CHECK(f && n4 == 1 && !bad && (strstr(why, "CRC-32") || (dmg && strstr(why, "unpack"))) && back == 0 && st.remastered == 0
+              && !hdskin_has_remaster(hd_name_hash("SKYLINE_TEAR_012")),
+              "pack: damaged (%s): refused (%s), the stock look (%zu pixels differ)\n", dmg ? "a pixel byte" : "its CRC-32", why, back);
+        free(bad);
+        if ((f = fopen(pak, "r+b"))){                              /* undone: each case one kind of damage */
+            fseek(f, at, SEEK_SET); int c = fgetc(f); fseek(f, at, SEEK_SET); fputc(c ^ 0x5a, f); fclose(f);
+        }
+    }
+    free(fromdir);
+    hdskin_set_pack(NULL);
+}
+
 static void test_api(const Fx *x){
     HdTexName nm[VB_MAX_LAYERS][2]; names_for(x, nm, NULL);
     HdStats a, b;
@@ -224,20 +380,23 @@ static void test_api(const Fx *x){
 }
 
 int main(int argc, char **argv){
-    if (argc < 3){ printf("usage: %s <scratch dir> fixture.bin [...]\n", argv[0]); return 2; }
-    const char *dir = argv[1];
+    /* no fixtures: the pack's round trip alone (web/test/runtime-unit.test.mjs) */
+    const char *dir = argc > 1 ? argv[1] : "out/hdskin_unit.tmp";
+    if (argc < 2 && system("mkdir -p out/hdskin_unit.tmp")){ printf("FAIL setup: cannot make %s\n", dir); return 1; }
+    test_pack_roundtrip(dir);
     int remastered = 0;
     for (int i = 2; i < argc; i++){
         static Fx x;
         if (!load(argv[i], &x)){ g_fail = 1; continue; }
         test_nearest(argv[i], &x, 0x1000u + (uint32_t)i);
-        if (!remastered && x.present == 2 && x.P.layer[0].ncolours && !x.P.layer[1].ncolours){ test_remaster(dir, argv[i], &x); remastered = 1; }
+        if (!remastered && x.present == 2 && x.P.layer[0].ncolours && !x.P.layer[1].ncolours){ test_remaster(dir, argv[i], &x); test_pack(dir, argv[i], &x); remastered = 1; }
         if (i == 2) test_api(&x);
         size_t ms, mc; hdskin_memory(&ms, &mc);
         printf("     memory now: surfaces %zu MB, cached sources %zu MB\n", ms >> 20, mc >> 20);
         free(x.data);
         hdskin_reset();
     }
-    if (!remastered){ printf("FAIL remaster: no fixture with a colourised layer 0 and a plain layer 1\n"); g_fail = 1; }
+    if (argc > 2 && !remastered){ printf("FAIL remaster: no fixture with a colourised layer 0 and a plain layer 1\n"); g_fail = 1; }
+    printf(g_fail ? "hdskin_unit: FAILED\n" : "hdskin_unit: all passed\n");
     return g_fail;
 }

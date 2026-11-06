@@ -3,6 +3,7 @@
 // - ui_textures = uhud turns on the maps' pack too (NFSU2_MAP_TEXTURES = detailed), unless NFSU2_MAP_TEXTURES says
 //   otherwise; map only the maps' (uiPack: no pack of the menus' and HUD's); original turns on neither
 // - the preload fetches each pack picked and its .tracks, and no other pack
+// - hd_vinyls = 1024 or 2048 picks the remaster pack (TEXPACKS/hdvinyls.pak, runtime/hdskin.c); off none
 // The modules are bundled from web/src with esbuild, as web/test/songs.test.mjs does.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -45,4 +46,16 @@ test('the preload fetches the packs picked and their .tracks', () => {
   assert.deepEqual(ahead('uhud'), ['TEXPACKS/uhud.pak', 'TRACKS/L4RA.BUN']);
   assert.deepEqual(ahead('uhud,detailed'), ['TEXPACKS/detailed.pak', 'TEXPACKS/detailed.tracks', 'TEXPACKS/uhud.pak', 'TRACKS/L4RA.BUN']);
   assert.deepEqual(ahead('detailed'), ['TEXPACKS/detailed.pak', 'TEXPACKS/detailed.tracks', 'TRACKS/L4RA.BUN'], 'Map only');
+});
+
+test('HD vinyls: 1024 and 2048 pick the remaster pack, off none', () => {
+  assert.deepEqual(['1024', '2048', '2', '4', 'off', '', undefined, 'OFF'].map(S.hdPack), ['hdvinyls', 'hdvinyls', 'hdvinyls', 'hdvinyls', '', '', '', '']);
+  assert.deepEqual(S.checkSetting('hd_vinyls', '2048'), { ok: true, env: 'NFSU2_HD_VINYLS', value: '2048' });
+  assert.equal(S.checkSetting('hd_vinyls', '4096')?.ok, false, 'a size it does not make');
+  assert.equal(S.resolveEnv('', {}, {}).env.NFSU2_HD_VINYLS, undefined, 'off by default');
+  const files = ['TEXPACKS/hdvinyls.pak', 'TEXPACKS/uhud.pak', 'TRACKS/L4RA.BUN'].map(p => ({ path: p, size: 10, mtime: 1 }));
+  const ahead = (texpack) => D.aheadFiles(files, 'english', { texpack, songs: '' }).map(x => x.path).sort();
+  assert.deepEqual(ahead(''), ['TRACKS/L4RA.BUN']);
+  assert.deepEqual(ahead('hdvinyls'), ['TEXPACKS/hdvinyls.pak', 'TRACKS/L4RA.BUN']);
+  assert.deepEqual(ahead('uhud,hdvinyls'), ['TEXPACKS/hdvinyls.pak', 'TEXPACKS/uhud.pak', 'TRACKS/L4RA.BUN']);
 });

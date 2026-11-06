@@ -292,7 +292,7 @@ Room set, the Room row says how many are in that room.
 | Friends & crews | crews (with their colours), and your friends (once your name is claimed) |
 | Game, Game | language, movies, music in drag and drift races, autosave; more: startup movies (skippable, original or off), sound, pause or keep running in the background, sound output latency, highest graphics for a new save |
 | Game, Display | full screen on Play (off: the game plays in the browser window; on by default on phones), resolution scale (phones start at 75%, 100% once one shows it has the room), frame rate (auto picks 30, 60, 120 or 240 from the screen: 120 from 119 Hz, 240 from 239 Hz, otherwise 60, so a 75 Hz or 144 Hz screen gets 60 or 120; or 30, 60, 120 or 240, where 30 keeps a phone that cannot hold 60 steady; Online and LAN races at most 120); more: HUD layout (wide, or 4:3 as phones start), movie framing, cutscene bars, 3D proportions (original, as the game drew them about 10 % too wide, or corrected: round wheels, a little more at the sides), other cars' headlights (players, all cars, off), frame-rate counter, fixed render size, pixel limit |
-| Mods | the mods built in, with their makers (the (i) after a row's name says what it does, who sees it, where it is set and its pages), and the settings of those that have one: Upscaled HUD and Detailed Map (original, map only or upscaled), English Subtitles Fixed (the subtitles), Uncensored & Restored Soundtrack (the songs: uncensored or original), Show Hidden Races Mod, Visual Reputation Remover; and our changes from the original game, a row per group (Driving, Free roam, Photos and screen, Career and garage, Controls, Saves), whose (i) lists them all |
+| Mods | the mods built in, with their makers (the (i) after a row's name says what it does, who sees it, where it is set and its pages), and the settings of those that have one: Upscaled HUD and Detailed Map (original, map only or upscaled), HD Vinyls (off, 1024 or 2048), English Subtitles Fixed (the subtitles), Uncensored & Restored Soundtrack (the songs: uncensored or original), Show Hidden Races Mod, Visual Reputation Remover; and our changes from the original game, a row per group (Driving, Free roam, Photos and screen, Career and garage, Controls, Saves), whose (i) lists them all |
 | Controls, Controller | rumble; more: controller (on, hotplug or off), menu buttons, dead zones, trigger full press |
 
 - **Language:** English, French, German, Italian, Spanish, Dutch, Swedish, Danish, Korean, Chinese, Japanese, Russian,
@@ -347,6 +347,11 @@ Room set, the Room row says how many are in that room.
   HUD. The game's layout stays as it is. Your browser fetches the packs only with Map only (about 20 MB) or Upscaled
   (about 25 MB in all; the maps as the game loads them). A language with fonts of its own (Russian, Polish, Turkish,
   Chinese, Japanese, Thai) keeps them. Most phones decode the larger textures into four times the memory.
+- **HD Vinyls** (Mods): off by default. 1024 or 2048 paints each car's vinyls and doorlines again at that size from
+  the server's remastered textures (TEXPACKS/hdvinyls.pak, made with tools/hdvinyls.py: docs/hd-vinyls.md) and shows
+  them in place of the game's 512x512 paint. A car with no remastered texture keeps the game's own paint. Your
+  browser fetches the pack only while this is on. 2048 takes about 16 MB of memory per painted car; a car's first
+  paint with remasters took about 0.1 s in Chrome on an M-series Mac.
 - **Radio:** the menu (F9) has a Radio line. It plays the music files of a folder on your device in place of the
   game's EA Trax songs. The folder icon picks the folder, its subfolders included; the list icon opens the Playlist:
   each track is Menu, Race, All or Off, and **Shuffle** plays them in random order. A new song starts with the next

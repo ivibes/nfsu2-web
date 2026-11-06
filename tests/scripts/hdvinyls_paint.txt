@@ -1,0 +1,35 @@
+# HD vinyls (settings.ini hd_vinyls; runtime/paintblend.c, runtime/hdskin.c, runtime/hdgpu.c): the main menu's car
+# (its paint: 350Z_ART_F_6 and 350Z_DOORLINE_WIDEBODY), Customize with everything unlocked (the game's unlock-all
+# flag [0x838464]), the car list six to the right (each car's doorline painted on the way: RX8, 350Z, G35, GTO,
+# SKYLINE), the Skyline into Customize, Visual, Vinyls, a category and two vinyls (SKYLINE_TEAR_012 over the
+# doorline).  Eight paints in all.  The log's "[hd-vinyls]" lines: "on" with the pack's and the directory's counts,
+# then one per paint, a composite (remastered=N stand-ins=M ms=...) where a layer has a remaster, else "skipped";
+# with NFSU2_HD_PROBE=1 also what the GPU shows ("gpu show ... -> 2048x2048"; HD off: "probe (HD off) ... GPU
+# texture 512x512").  A remaster of a texture this paints, as a test pack: tools/hdvinyls.py on a folder with
+# 350Z_ART_F_6.dds and 350Z_ART_F_6_MASK.dds.
+#   tools/autorun.sh <out> NFSU2_DATA=<game folder with TEXPACKS/hdvinyls.pak> NFSU2_INPUT_SCRIPT=tests/scripts/hdvinyls_paint.txt
+#        NFSU2_HD_VINYLS=2048 [NFSU2_HD_PROBE=1] [NFSU2_HD_VINYLS_ALL=1: every paint, stand-ins too] ALARM=300
+0       tapuntil RETURN MC_Background.fng 120 4000       # title -> profile prompt
++120    tapuntil RETURN GarageMain.fng 120 3000          # "No" -> main menu (the menu car is painted)
++60     poke 0x838464 1                                  # unlock all
++0      tap RIGHT
++30     tap RIGHT
++30     tap RIGHT                                        # Customize
++90     tap RETURN
++0      waitfng UI_QRCarSelect.fng 1200
++120    loop 6
++45     tap RIGHT                                        # each car's doorline painted
++0      endloop
++240    tap RETURN                                       # the Skyline
++0      waitfng UI_ChooseCustomizeCategory.fng 1200
++120    tap RIGHT
++45     tap RIGHT
++90     tap RETURN                                       # Visual
++180    tap RIGHT
++90     tap RETURN                                       # Vinyls
++180    tap RETURN                                       # a category
++285    tap RETURN                                       # its first vinyl
++300    tap RIGHT
++300    tap RIGHT                                        # the next ones
++300    log HDVINYLS DONE
++0      quit

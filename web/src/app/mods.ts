@@ -132,6 +132,15 @@ export const MODS: readonly Mod[] = [
     online: 'mine', sizeMB: 20, files: ['tools/texpacks.py', 'runtime/web/texrep_web.c'],
   },
   {
+    id: 'hd-vinyls', name: 'HD Vinyls', authors: [{ name: 'ivibes', url: 'https://github.com/ivibes' }],
+    links: { source: 'https://github.com/ivibes/nfsu2-web' },
+    kind: 'screen', uses: 'data', control: { setting: 'hd_vinyls', values: ['1024', '2048'] },
+    line: N('The cars\' vinyls and doorlines painted at 1024 or 2048.'),
+    details: 'Each car\'s paint is painted again at 1024x1024 or 2048x2048 from the server\'s remastered vinyls, masks and doorlines, and shown in place of the game\'s 512x512. A car with no remastered texture keeps the game\'s own paint, and the game itself still paints and measures its 512. 2048 takes 16 MB of memory for each painted car.',
+    online: 'mine', files: ['tools/hdvinyls.py', 'runtime/hdskin.c', 'runtime/hdskin.h', 'runtime/paintblend.c', 'runtime/hdgpu.c',
+      'runtime/vinylblend.c'],
+  },
+  {
     id: 'widescreen', name: 'Widescreen Fix', mod: 'Widescreen Fixes Pack', authors: [{ name: 'ThirteenAG' }, { name: 'Aero_' }, { name: 'xan1242' }],
     links: { page: 'https://nfsmods.xyz/mod/3327', source: 'https://github.com/ThirteenAG/WidescreenFixesPack' },
     kind: 'screen', uses: 'findings', licence: 'MIT',

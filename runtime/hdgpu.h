@@ -7,7 +7,7 @@
  * (hdgpu_be_show / hdgpu_be_hide below): runtime/texrep.m on the Mac binds
  * an HD Metal texture in the draw encoder in place of the game's (as its
  * texture packs do); runtime/web/texrep_web.c makes the browser's texture
- * again at the HD size (metal_replace_texture, as the Detailed Map pack).
+ * again at the HD size (metal_replace_texture, as it does for its texture packs).
  *
  * When the game uploads that texture again:
  *   - inside its own blend (between hdgpu_blend_begin and hdgpu_blend_end)

@@ -38,8 +38,9 @@ export interface CacheFile { h: FileSystemSyncAccessHandle; have: Uint8Array; ha
 
 export const manifestFiles = (m: Manifest): DataFile[] => m.files.filter(f => !f.d).map(f => ({ path: f.p, size: f.s ?? 0, mtime: f.m ?? 0 }));
 const parts = (f: DataFile) => f.path.toLowerCase().split('/');
-/** The data the settings pick: a texture pack (TEXPACKS/<name>.pak, runtime/web/texrep_web.c; '' for none) and the
- *  songs (settings.ini songs: 'original' reads pfdata/original's files in place of pfdata's, songsPath). */
+/** The data the settings pick: the texture packs (TEXPACKS/<name>.pak: runtime/web/texrep_web.c's, and hdvinyls.pak,
+ *  runtime/hdskin.c's; '' for none) and the songs (settings.ini songs: 'original' reads pfdata/original's files in
+ *  place of pfdata's, songsPath). */
 export interface Packs { texpack: string; songs: string }
 export const NO_PACKS: Packs = { texpack: '', songs: '' };
 /** EA's own songs (tools/musicpack.py --original) for a file of pfdata: pfdata/<name> -> pfdata/original/<name>; null
