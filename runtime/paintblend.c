@@ -213,6 +213,12 @@ static int hd_composite(const uint8_t *rec){
     double t1; { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); t1 = (double)t.tv_sec * 1e3 + (double)t.tv_nsec * 1e-6; }
     size_t ms, mc; hdskin_memory(&ms, &mc);
     if (!r){ fprintf(stderr, "[hd-vinyls] composite surface=%s ti=%08x %dx%d x%d: FAILED (size or memory)\n", snm, ti, P.w, P.h, s); return 0; }
+    if (!st.remastered && !hd_all()){                /* each remaster refused while loading: the stock look as above */
+        hdskin_forget(ti);
+        fprintf(stderr, "[hd-vinyls] composite surface=%s ti=%08x %dx%d layers=%d remastered=0: refused, the game's own texture\n",
+                snm, ti, P.w, P.h, present);
+        return 0;
+    }
     fprintf(stderr, "[hd-vinyls] composite surface=%s ti=%08x %dx%d -> %dx%d layers=%d remastered=%d stand-ins=%d cached=%d"
             " marker_texels=%d gen=%u ms=%.2f (read %.2f, sources %.2f, blend %.2f) memory: surfaces %zu MB, sources %zu MB%s\n",
             snm, ti, P.w, P.h, P.w * s, P.h * s, present, st.remastered, st.standin, st.cached, st.markers, st.generation,
