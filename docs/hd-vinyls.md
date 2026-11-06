@@ -12,7 +12,8 @@ files:
     tools/hdvinyls.py <game folder> <remaster folder>        # writes <game folder>/TEXPACKS/hdvinyls.pak
     tools/hdvinyls.py --out <file.pak> <remaster folder>      # anywhere else
 
-Restart the game (the browser: press Play again) after changing the pack.
+A pack can be at most 2 GB; the tool refuses more. Restart the game (the browser: press Play again) after changing
+the pack.
 
 ## One file per texture
 
@@ -54,5 +55,6 @@ colourisable, `00000000` plain.
 
 The log has one `[hd-vinyls]` line per paint: `remastered=N` counts the textures taken from the pack (a vinyl and its
 mask are two). `skipped` means no layer of that paint has a remaster. A file the runtime cannot use is named once
-("refused") and the stock texture is used instead. For development, `NFSU2_HD_VINYL_DIR=<folder>` reads the DDS files
-straight from a folder (they come before the pack's), with no pack to build.
+("refused") and the stock texture is used instead; a paint with nothing else remastered keeps the game's own texture.
+For development, `NFSU2_HD_VINYL_DIR=<folder>` reads the DDS files straight from a folder (they come before the
+pack's), with no pack to build.
